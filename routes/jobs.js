@@ -6,9 +6,11 @@ import Workers from "../models/workers.js";
 import Jobs from "../models/job.js";
 import Applications from "../models/application.js";
 import Reviews from "../models/rating.js";
+import JOB_STATUS from "../constants/jobStatus.js";
+
 const router = express.Router();
 
-//Customer Creates a Job Post.
+// Customer creates a job
 router.post("/post", auth, customer, async (req, res) => {
   const job = new Jobs({
     customer: req.user._id,
@@ -16,16 +18,16 @@ router.post("/post", auth, customer, async (req, res) => {
     description: req.body.description,
     skillsRequired: req.body.skillsRequired,
     location: req.body.location,
+    workersNeeded: req.body.workersNeeded || 1,
   });
   await job.save();
   res.send(job);
 });
 
-//Customer update the post
+// Customer updates a job
 router.put("/:id", auth, customer, async (req, res) => {
   const job = await Jobs.findById(req.params.id);
   if (!job) return res.status(404).send("Job not found");
-
   if (job.customer.toString() !== req.user._id.toString())
     return res.status(403).send("Access denied");
 
@@ -33,16 +35,16 @@ router.put("/:id", auth, customer, async (req, res) => {
   job.description = req.body.description ?? job.description;
   job.skillsRequired = req.body.skillsRequired ?? job.skillsRequired;
   job.location = req.body.location ?? job.location;
+  job.workersNeeded = req.body.workersNeeded ?? job.workersNeeded;
 
   await job.save();
   res.send(job);
 });
 
-//Customer deletes the post
+// Customer deletes a job
 router.delete("/:id", auth, customer, async (req, res) => {
   const job = await Jobs.findById(req.params.id);
   if (!job) return res.status(404).send("Job not found");
-
   if (job.customer.toString() !== req.user._id.toString())
     return res.status(403).send("Access denied");
 
@@ -50,145 +52,208 @@ router.delete("/:id", auth, customer, async (req, res) => {
   res.send({ message: "Job deleted successfully" });
 });
 
-//Worker Browses according to the skills.
+// Worker browses jobs matching skills with pagination
 router.get("/", auth, worker, async (req, res) => {
+  const { page = 1, limit = 10 } = req.query;
   const workerProfile = await Workers.findOne({ user: req.user._id });
   if (!workerProfile) return res.status(404).send("Worker profile not found");
+
   const jobs = await Jobs.find({
-    status: "open",
-    skillsRequired: { $in: workerProfile.skills },
-  });
+    status: JOB_STATUS.OPEN,
+    skillsRequired: { $in: workerProfile.skills.map((s) => s.skill) },
+  })
+    .skip((page - 1) * limit)
+    .limit(parseInt(limit));
+
   res.send(jobs);
 });
 
-//Worker can apply to the job.
+// Worker applies to a job
 router.post("/:jobId/apply", auth, worker, async (req, res) => {
-  const proposedPrice = req.body.proposedPrice;
-  const jobId = req.params.jobId;
-  const workerId = req.user._id;
-  const job = await Jobs.findById(jobId);
+  const job = await Jobs.findById(req.params.jobId);
   if (!job) return res.status(404).send("Job not found");
+  if (job.status !== JOB_STATUS.OPEN)
+    return res.status(400).send("Job not open for applications");
 
-  let existingApplication = await Applications.findOne({
-    job: jobId,
-    worker: workerId,
+  const existing = await Applications.findOne({
+    job: job._id,
+    worker: req.user._id,
   });
-  if (existingApplication)
-    return res.status(400).send("You already applied for this job");
+  if (existing) return res.status(400).send("Already applied");
+  if (!req.body.proposedPrice || req.body.proposedPrice <= 0)
+    return res.status(400).send("Invalid proposed price");
+
   const application = new Applications({
-    job: jobId,
-    worker: workerId,
+    job: job._id,
+    worker: req.user._id,
     customer: job.customer,
-    proposedPrice: proposedPrice,
+    proposedPrice: req.body.proposedPrice,
   });
   await application.save();
-  res.send("Applied successfully");
+  res.send({ message: "Applied successfully", application });
 });
 
-//Worker cancelled the application
+// Worker cancels application
 router.post("/:jobId/cancel", auth, worker, async (req, res) => {
-  const jobId = req.params.jobId;
-  const workerId = req.user._id;
-
   const application = await Applications.findOne({
-    job: jobId,
-    worker: workerId,
-    status: "accepted",
+    job: req.params.jobId,
+    worker: req.user._id,
+    status: { $in: ["pending", "selected", "countered", "accepted"] },
   });
 
-  if (!application)
-    return res.status(404).send("No accepted application found");
+  if (!application) return res.status(404).send("No active application");
+
+  const job = await Jobs.findById(req.params.jobId);
+  if (job.status === JOB_STATUS.IN_PROGRESS)
+    return res.status(400).send("Cannot cancel after job started");
 
   application.status = "cancelled";
   await application.save();
 
-  const job = await Jobs.findById(jobId);
   job.assignedWorkers = job.assignedWorkers.filter(
-    (w) => w.worker.toString() !== workerId.toString()
+    (w) => w.worker.toString() !== req.user._id.toString()
   );
-
-  // If no workers assigned, set job back to open
-  if (job.assignedWorkers.length < job.workersNeeded) job.status = "open";
+  if (job.assignedWorkers.length < job.workersNeeded)
+    job.status = JOB_STATUS.OPEN;
 
   await job.save();
-
-  res.send({ message: "You have cancelled the job" });
+  res.send({ message: "Application cancelled successfully" });
 });
 
-//Customer can view the workers who applied for the job.
+// Customer views applicants with ranking
 router.get("/:jobId/applicants", auth, customer, async (req, res) => {
-  const jobId = req.params.jobId;
-  const job = await Jobs.findById(jobId);
+  const job = await Jobs.findById(req.params.jobId);
   if (!job) return res.status(404).send("Job not found");
   if (job.customer.toString() !== req.user._id)
     return res.status(403).send("Access Denied");
-  const applicants = await Applications.find({ job: jobId }).populate(
-    "worker",
-    "username skills rating totalReviews location proposedPrice"
+
+  const applicants = await Applications.find({ job: job._id }).populate(
+    "worker"
   );
-  const ranked = [];
-  for (const app of Applications) {
-    const workerProfile = await Workers.findOne({ user: app.worker._id });
-
-    let skillScore = 0;
-    workerProfile.skills.forEach((ws) => {
-      if (job.skillsRequired.includes(ws.skill)) {
-        skillScore += ws.level * 2;
-      }
-    });
-    const totalScore = skillScore + workerProfile.rating;
-
-    ranked.push({
+  const ranked = applicants.map((app) => {
+    const wp = app.worker;
+    let skillScore = wp.skills.reduce(
+      (sum, s) =>
+        job.skillsRequired.includes(s.skill.toString())
+          ? sum + s.level * 2
+          : sum,
+      0
+    );
+    return {
       application: app,
-      score: totalScore,
-      rating: workerProfile.rating,
-    });
-  }
-
+      score: skillScore + wp.rating,
+    };
+  });
   ranked.sort((a, b) => b.score - a.score);
-
   res.send(ranked);
 });
 
-//Customer chooses the worker for the job
-router.put("/:jobId/applicants/:appId", auth, customer, async (req, res) => {
-  const { jobId, appId } = req.params;
-  const { status } = req.body;
+//Customer selects worker
+router.put(
+  "/:jobId/applicants/:appId/select",
+  auth,
+  customer,
+  async (req, res) => {
+    const { counterPrice } = req.body; // optional
 
-  const application = await Applications.findById(appId);
+    const job = await Jobs.findById(req.params.jobId);
+    if (!job) return res.status(404).send("Job not found");
+
+    if (job.customer.toString() !== req.user._id.toString())
+      return res.status(403).send("Access denied");
+
+    if (job.status !== JOB_STATUS.OPEN)
+      return res.status(400).send("Job not open");
+
+    const application = await Applications.findById(req.params.appId);
+    if (!application) return res.status(404).send("Application not found");
+
+    application.status = "selected";
+    application.finalPrice = counterPrice ?? application.proposedPrice;
+
+    await application.save();
+
+    job.status = JOB_STATUS.AWAITING_CONFIRMATION;
+    await job.save();
+
+    res.send({
+      message: counterPrice
+        ? "Worker selected with counter offer"
+        : "Worker selected at proposed price",
+      application,
+    });
+  }
+);
+
+// Worker confirms the assignment
+
+router.put("/applications/:appId/confirm", auth, worker, async (req, res) => {
+  const application = await Applications.findById(req.params.appId);
   if (!application) return res.status(404).send("Application not found");
 
-  const job = await Jobs.findById(jobId);
-  if (!job) return res.status(404).send("Job not found");
+  if (application.worker.toString() !== req.user._id.toString())
+    return res.status(403).send("Access denied");
 
-  if (job.customer.toString() !== req.user._id.toString())
-    return res.status(403).send("Access Denied");
+  if (application.status !== "selected")
+    return res.status(400).send("Job not selected yet");
 
-  if (job.assignedWorkers.length >= job.workersNeeded)
-    return res.status(400).send("Worker limit reached");
+  const job = await Jobs.findById(application.job);
 
-  application.status = status;
+  application.status = "confirmed";
   await application.save();
 
-  if (status === "assigned") {
-    job.assignedWorkers.push({
-      worker: application.worker,
-      agreedPrice: application.proposedPrice,
-    });
-    await job.save();
+  job.assignedWorkers.push({
+    worker: application.worker,
+    agreedPrice: application.finalPrice,
+  });
+
+  if (job.assignedWorkers.length === job.workersNeeded) {
+    job.status = JOB_STATUS.ASSIGNED;
+
+    await Applications.updateMany(
+      { job: job._id, _id: { $ne: application._id } },
+      { status: "rejected" }
+    );
   }
 
-  res.send(application);
+  await job.save();
+  res.send({ message: "Job confirmed successfully" });
 });
 
-//Customer rates the worker after task is completed
+//Job Progress
+
+router.put("/:jobId/start", auth, worker, async (req, res) => {
+  const job = await Jobs.findById(req.params.jobId);
+  if (!job) return res.status(404).send("Job not found");
+  if (!job.assignedWorkers.some((w) => w.worker.toString() === req.user._id))
+    return res.status(403).send("Not assigned to this job");
+
+  job.status = JOB_STATUS.IN_PROGRESS;
+  await job.save();
+  res.send({ message: "Job started" });
+});
+
+//Completion of job
+router.put("/:jobId/complete", auth, customer, async (req, res) => {
+  const job = await Jobs.findById(req.params.jobId);
+  if (!job) return res.status(404).send("Job not found");
+  if (job.customer.toString() !== req.user._id)
+    return res.status(403).send("Access denied");
+
+  job.status = JOB_STATUS.COMPLETED;
+  await job.save();
+  res.send({ message: "Job marked as completed" });
+});
+
+// Customer reviews and rates the worker
+
 router.post("/:jobId/review", auth, customer, async (req, res) => {
   const { rating, comment } = req.body;
   const job = await Jobs.findById(req.params.jobId);
-
   if (!job) return res.status(404).send("Job not found");
-  if (job.status !== "completed")
+  if (job.status !== JOB_STATUS.COMPLETED)
     return res.status(400).send("Job not completed yet");
+
   for (const assignedWorker of job.assignedWorkers) {
     const existingReview = await Reviews.findOne({
       job: job._id,
@@ -203,10 +268,8 @@ router.post("/:jobId/review", auth, customer, async (req, res) => {
       rating,
       comment,
     });
-
     await review.save();
 
-    // Update worker rating summary
     const workerProfile = await Workers.findOne({
       user: assignedWorker.worker,
     });
@@ -216,6 +279,7 @@ router.post("/:jobId/review", auth, customer, async (req, res) => {
     workerProfile.totalReviews += 1;
     await workerProfile.save();
   }
+
   res.send({ message: "Review(s) submitted successfully" });
 });
 

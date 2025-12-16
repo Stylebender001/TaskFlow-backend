@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import JOB_STATUS from "../constants/jobStatus.js";
 
 const jobSchema = new mongoose.Schema({
   customer: {
@@ -31,8 +32,8 @@ const jobSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["open", "assigned", "In-progress", "completed", "cancelled"],
-    default: "open",
+    enum: Object.values(JOB_STATUS),
+    default: JOB_STATUS.OPEN,
   },
   workersNeeded: {
     type: Number,
