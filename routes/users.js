@@ -1,16 +1,10 @@
 import express from "express";
 import Users from "../models/user.js";
-import Workers from "../models/workers.js";
 import validateUser from "../validation/user.js";
 import _ from "lodash";
 import bcrypt from "bcrypt";
 
 const router = express.Router();
-
-router.get("/", async (req, res) => {
-  const user = await Users.find().select("-password");
-  res.send(user);
-});
 
 router.post("/", async (req, res) => {
   let user = await Users.findOne({ email: req.body.email });

@@ -312,15 +312,26 @@ router.post("/:jobId/review", auth, customer, async (req, res) => {
   const { rating, comment } = req.body;
   const job = await Jobs.findById(req.params.jobId);
   if (!job) return res.status(404).send("Job not found");
+  if (job.customer.toString() !== req.user._id.toString())
+    return res.status(403).send("Not your job");
+  if (!job.assignedWorkers || job.assignedWorkers.length === 0) {
+    return res.status(400).send("No workers assigned to this job");
+  }
+
   if (job.status !== JOB_STATUS.COMPLETED)
     return res.status(400).send("Job not completed yet");
+  console.log("JOB FOUND:", job._id);
+  console.log("ASSIGNED WORKERS:", job.assignedWorkers);
 
   for (const assignedWorker of job.assignedWorkers) {
+    console.log("assignedWorker:", assignedWorker);
+    console.log("worker id:", assignedWorker.worker);
+
     const existingReview = await Reviews.findOne({
       job: job._id,
       worker: assignedWorker.worker,
     });
-    if (!existingReview) return res.status(400).send("Review already exists");
+    if (existingReview) continue;
 
     const review = new Reviews({
       job: job._id,

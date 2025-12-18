@@ -40,15 +40,9 @@ router.put("/setup", auth, customer, async (req, res) => {
   if (!customer) return res.status(403).send("Customer not found");
   const { error } = validateCustomer(req.body);
   if (error) return res.status(403).send(error.details[0].message);
-  const updatedCustomer = await Customers.findOneAndUpdate(
-    { user: userId },
-    {
-      user: userId,
-      location: req.body.location,
-      phoneNo: req.body.phoneNo,
-    },
-    { new: true }
-  );
+  const updatedCustomer = await Customers.findByid(userId);
+  updatedCustomer.location = req.body.location ?? updatedCustomer.location;
+  updatedCustomer.phoneNo = req.body.phoneNo ?? updatedCustomer.phoneNo;
   res.send(updatedCustomer);
 });
 

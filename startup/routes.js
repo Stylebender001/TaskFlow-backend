@@ -9,8 +9,8 @@ import admin from "../routes/admin.js";
 
 export default function (app) {
   app.use(express.json());
-  app.use("/api/users", users);
-  app.use("/api/auth", auth);
+  app.use("/api/signup", users);
+  app.use("/api/login", auth);
   app.use("/api/workers", workers);
   app.use("/api/customers", customers);
   app.use("/api/jobs", jobs);
